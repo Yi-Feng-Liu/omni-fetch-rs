@@ -1,11 +1,13 @@
 node_modules/
+.pnpm-store/
 dist/
 src-tauri/target/
-src-tauri/binaries/*.exe
-src-tauri/binaries/*.zip
-src-tauri/binaries/*.tmp
+src-tauri/binaries/
 coverage/
 .idea/
 .vscode/
 *.log
-
+.env
+.env.*
+!.env.example
+*cookies*.txt
