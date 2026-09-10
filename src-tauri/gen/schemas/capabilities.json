@@ -1,0 +1,1 @@
+{"main-capability":{"identifier":"main-capability","description":"Only grants the main window access to the folder picker. Media tools are invoked by validated Rust commands.","local":true,"windows":["main"],"permissions":["core:default","dialog:allow-open"]}}

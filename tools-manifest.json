@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "targetTriple": "x86_64-pc-windows-msvc",
+  "ytDlp": {
+    "version": "2026.08.19",
+    "assetUrl": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp.exe",
+    "checksumUrl": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/SHA2-256SUMS",
+    "checksumFileName": "yt-dlp.exe",
+    "sha256": "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a",
+    "license": "Unlicense with bundled third-party licenses"
+  },
+  "galleryDl": {
+    "version": "1.32.12-dev:2026.09.10",
+    "assetUrl": "https://github.com/gdl-org/builds/releases/download/2026.09.10/gallery-dl_windows.exe",
+    "sha256": "1c4a7f897f6cb0d75639a5905d2a0a1f1ee2fc6d881c2af97f289d7bba367ac2",
+    "license": "GPL-2.0-only"
+  },
+  "ffmpeg": {
+    "version": "9.0.1",
+    "assetUrl": "https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-essentials_build.zip",
+    "checksumUrl": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip.sha256",
+    "sha256": "fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9",
+    "license": "GPL-3.0-or-later build"
+  }
+}
