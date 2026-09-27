@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   CheckCircle2, CircleAlert, Download, ExternalLink, FolderOpen, Instagram,
-  LoaderCircle, Music2, RefreshCw, RotateCcw, Settings2, ShieldCheck, Square,
+  Globe2, LoaderCircle, Music2, RefreshCw, RotateCcw, Settings2, ShieldCheck, Square,
   Video, Youtube,
 } from "lucide-react";
 import { api } from "./api";
@@ -43,8 +43,20 @@ function taskIsActive(task: DownloadTask) {
   return ["queued", "analyzing", "downloading", "converting"].includes(task.status);
 }
 
+function taskHasMeasuredProgress(task: DownloadTask) {
+  return task.percent > 0 || task.downloadedBytes !== undefined || Boolean(task.speed);
+}
+
+function platformLabel(platform: MediaAnalysis["platform"]) {
+  if (platform === "youtube") return "YOUTUBE";
+  if (platform === "instagram") return "INSTAGRAM";
+  return "一般網頁";
+}
+
 export default function App() {
   const [url, setUrl] = useState("");
+  const [sourcePageUrl, setSourcePageUrl] = useState("");
+  const [outputFilename, setOutputFilename] = useState("");
   const [settings, setSettings] = useState<AppSettings>(initialSettings);
   const [analysis, setAnalysis] = useState<MediaAnalysis>();
   const [format, setFormat] = useState<OutputFormat>("mp4");
@@ -95,15 +107,17 @@ export default function App() {
 
   async function analyze() {
     if (!url.trim()) return;
-    setBusy(true); setMessage(""); setAnalysis(undefined);
+    setBusy(true); setMessage(""); setAnalysis(undefined); setOutputFilename("");
     try {
       const result = await api.analyze({
         url: url.trim(),
         platform: settings.platformMode,
+        sourcePageUrl: settings.platformMode === "web" ? sourcePageUrl.trim() || undefined : undefined,
         browserSource: settings.browserSource,
         cookieFilePath: settings.cookieFilePath,
       });
       setAnalysis(result);
+      setOutputFilename(result.platform === "web" ? result.title : "");
       const defaultFormat: OutputFormat = result.platform === "instagram" ? "original" : "mp4";
       setFormat(defaultFormat);
       setQuality(result.qualities.at(-1)?.height);
@@ -118,6 +132,8 @@ export default function App() {
       const task = await api.enqueue({
         url: analysis.url,
         platform: analysis.platform,
+        sourcePageUrl: analysis.platform === "web" ? sourcePageUrl.trim() || undefined : undefined,
+        outputFilename: analysis.platform === "web" ? outputFilename.trim() || undefined : undefined,
         browserSource: settings.browserSource,
         cookieFilePath: settings.cookieFilePath,
         outputFormat: format,
@@ -127,7 +143,7 @@ export default function App() {
         itemCount: analysis.items.length,
       });
       setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
-      setAnalysis(undefined); setUrl("");
+      setAnalysis(undefined); setUrl(""); setSourcePageUrl(""); setOutputFilename("");
     } catch (error) { setMessage(errorText(error)); }
     finally { setBusy(false); }
   }
@@ -163,6 +179,8 @@ export default function App() {
   async function changePlatformMode(platformMode: AppSettings["platformMode"]) {
     setAnalysis(undefined);
     setMessage("");
+    setSourcePageUrl("");
+    setOutputFilename("");
     await persist({ ...settings, platformMode });
   }
 
@@ -204,18 +222,23 @@ export default function App() {
           <div className="mode-switch" aria-label="下載平台">
             <button className={settings.platformMode === "instagram" ? "active" : ""} onClick={() => void changePlatformMode("instagram")}><Instagram size={17} />Instagram</button>
             <button className={settings.platformMode === "youtube" ? "active" : ""} onClick={() => void changePlatformMode("youtube")}><Youtube size={18} />YouTube</button>
+            <button className={settings.platformMode === "web" ? "active" : ""} onClick={() => void changePlatformMode("web")}><Globe2 size={18} />一般網頁</button>
           </div>
-          <div className="eyebrow">{settings.platformMode === "instagram" ? "PHOTOS · CAROUSELS · REELS" : "VIDEOS · SHORTS · MP3"}</div>
+          <div className="eyebrow">{settings.platformMode === "instagram" ? "PHOTOS · CAROUSELS · REELS" : settings.platformMode === "youtube" ? "VIDEOS · SHORTS · MP3" : "WEB VIDEO · HLS · M3U8"}</div>
           <h1>貼上連結，<em>帶走你要的內容。</em></h1>
           <p>下載圖片、影片或轉成高品質 MP3。簡單、快速，檔案留在你的電腦。</p>
           <div className="url-box">
             <input aria-label="媒體網址" value={url} onChange={(e) => setUrl(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") void analyze(); }}
-              placeholder={settings.platformMode === "instagram" ? "貼上 Instagram 貼文或 Reels 網址…" : "貼上 YouTube 影片或 Shorts 網址…"} />
+              placeholder={settings.platformMode === "instagram" ? "貼上 Instagram 貼文或 Reels 網址…" : settings.platformMode === "youtube" ? "貼上 YouTube 影片或 Shorts 網址…" : "貼上影片網頁或 .m3u8 網址…"} />
             <button className="primary" disabled={busy || !url.trim()} onClick={() => void analyze()}>
               {busy ? <LoaderCircle className="spin" size={19} /> : <Download size={19} />} 分析連結
             </button>
           </div>
+          {settings.platformMode === "web" && <label className="source-page-field">來源頁網址（選填）
+            <input aria-label="來源頁網址" value={sourcePageUrl} onChange={(event) => setSourcePageUrl(event.target.value)} placeholder="例如：https://example.com/watch/123" />
+            <small>已知網站會自動轉換；其他 CDN 若拒絕存取，請填入實際播放影片的網頁作為 Referer。</small>
+          </label>}
           <div className="trust"><ShieldCheck size={15} /> 僅使用你選擇的登入來源；Omni Fetch 不保存帳號密碼或 Cookie 內容。</div>
         </section>
 
@@ -224,7 +247,7 @@ export default function App() {
         {analysis && <section className="analysis card">
           {analysis.thumbnail ? <img src={analysis.thumbnail} alt="媒體縮圖" /> : <div className="thumb-placeholder"><Video /></div>}
           <div className="analysis-body">
-            <div className="platform">{analysis.platform === "youtube" ? "YOUTUBE" : "INSTAGRAM"}{analysis.isCarousel && ` · ${analysis.items.length} 個項目`}</div>
+            <div className="platform">{platformLabel(analysis.platform)}{analysis.isCarousel && ` · ${analysis.items.length} 個項目`}</div>
             <h2>{analysis.title}</h2>
             {analysis.uploader && <p>{analysis.uploader}</p>}
             <div className="options">
@@ -234,9 +257,13 @@ export default function App() {
               {format === "mp4" && analysis.qualities.length > 0 && <label>影片畫質<select value={selectedQuality} onChange={(e) => setQuality(Number(e.target.value))}>
                 {analysis.qualities.map((item) => <option value={item.height} key={item.height}>{item.label}{item.estimatedBytes ? ` · ${bytes(item.estimatedBytes)}` : ""}</option>)}
               </select></label>}
+              {analysis.platform === "web" && <label className="filename-label">儲存檔名（不含副檔名）
+                <input aria-label="儲存檔名" value={outputFilename} maxLength={120} onChange={(event) => setOutputFilename(event.target.value)} />
+                <small>Windows 不允許的字元會自動替換，副檔名由輸出格式決定。</small>
+              </label>}
               <label className="folder-label">儲存位置<button className="folder-picker" onClick={() => void chooseDirectory()}><FolderOpen size={17} /><span>{settings.outputDirectory || "選擇資料夾"}</span></button></label>
             </div>
-            <button className="primary download-button" disabled={busy || !settings.outputDirectory} onClick={() => void enqueue()}><Download size={18} />加入下載佇列</button>
+            <button className="primary download-button" disabled={busy || !settings.outputDirectory || (analysis.platform === "web" && !outputFilename.trim())} onClick={() => void enqueue()}><Download size={18} />加入下載佇列</button>
           </div>
         </section>}
 
@@ -247,9 +274,9 @@ export default function App() {
               <div className={`task-icon ${task.status}`}>{task.status === "completed" ? <CheckCircle2 /> : task.request.outputFormat === "mp3" ? <Music2 /> : <Video />}</div>
               <div className="task-content">
                 <div className="task-title"><strong>{task.title}</strong><span className={task.status}>{statusText[task.status]}</span></div>
-                <div className="task-meta">{task.request.outputFormat.toUpperCase()} · {bytes(task.downloadedBytes)}{task.totalBytes ? ` / ${bytes(task.totalBytes)}` : ""}{task.speed ? ` · ${task.speed}` : ""}{task.eta ? ` · 剩餘 ${task.eta}` : ""}</div>
+                <div className="task-meta">{task.request.outputFormat.toUpperCase()} · {bytes(task.downloadedBytes)}{task.totalBytes ? ` / ${bytes(task.totalBytes)}` : ""}{task.speed ? ` · ${task.speed}` : ""}{task.eta ? ` · 剩餘 ${task.eta}` : ""}{taskIsActive(task) && !taskHasMeasuredProgress(task) ? " · 等待下載資料…" : ""}</div>
                 {task.error && <div className="task-error">{task.error}</div>}
-                {taskIsActive(task) && <div className="progress"><i style={{ width: `${Math.max(2, task.percent)}%` }} /></div>}
+                {taskIsActive(task) && <div className={`progress ${taskHasMeasuredProgress(task) ? "" : "indeterminate"}`}><i style={{ width: `${Math.max(2, task.percent)}%` }} /></div>}
                 {task.outputs.length > 0 && <div className="outputs">{task.outputs.map((item) => <button key={item} onClick={() => void api.openFolder(item)}><ExternalLink size={13} />{item.split(/[\\/]/).at(-1)}</button>)}</div>}
               </div>
               <div className="task-actions">

@@ -1,4 +1,4 @@
-export type Platform = "youtube" | "instagram";
+export type Platform = "youtube" | "instagram" | "web";
 export type BrowserSource = "none" | "chrome" | "edge" | "cookiesFile";
 export type OutputFormat = "mp4" | "mp3" | "original";
 export type TaskStatus =
@@ -8,6 +8,7 @@ export type TaskStatus =
 export interface AnalyzeRequest {
   url: string;
   platform: Platform;
+  sourcePageUrl?: string;
   browserSource: BrowserSource;
   cookieFilePath?: string;
 }
@@ -42,6 +43,8 @@ export interface MediaAnalysis {
 export interface DownloadRequest {
   url: string;
   platform: Platform;
+  sourcePageUrl?: string;
+  outputFilename?: string;
   browserSource: BrowserSource;
   cookieFilePath?: string;
   outputFormat: OutputFormat;

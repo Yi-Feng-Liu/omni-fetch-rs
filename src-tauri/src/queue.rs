@@ -1,9 +1,12 @@
 use crate::{
-    errors::friendly_error,
+    errors::friendly_error_for_request,
     models::{DownloadRequest, DownloadTask, OutputFormat, Platform, ProgressEvent, TaskStatus},
-    progress::{parse_item, parse_output, parse_progress},
+    progress::{parse_item, parse_output, parse_progress, ParsedProgress},
     tools,
-    validation::{safe_title, validate_cookie_file, validate_media_url, validate_output_directory},
+    validation::{
+        resolve_web_media_url, safe_title, validate_cookie_file, validate_media_url,
+        validate_output_directory, validate_output_filename, validate_source_page_url,
+    },
 };
 use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc};
 use tauri::{AppHandle, Emitter};
@@ -49,7 +52,10 @@ pub fn create() -> (AppState, mpsc::Receiver<Job>) {
 fn new_task(id: String, request: DownloadRequest, platform: Platform) -> DownloadTask {
     DownloadTask {
         id,
-        title: safe_title(request.title.as_deref().unwrap_or("未命名媒體")),
+        title: request
+            .output_filename
+            .clone()
+            .unwrap_or_else(|| safe_title(request.title.as_deref().unwrap_or("未命名媒體"))),
         request,
         platform,
         status: TaskStatus::Queued,
@@ -68,15 +74,26 @@ pub async fn enqueue(
     state: &AppState,
     mut request: DownloadRequest,
 ) -> Result<DownloadTask, String> {
-    let (canonical_url, platform) = validate_media_url(&request.url)?;
-    if platform != request.platform {
-        return Err(match request.platform {
-            Platform::Instagram => "目前是 Instagram 模式，請貼上 Instagram 網址。",
-            Platform::Youtube => "目前是 YouTube 模式，請貼上 YouTube 網址。",
-        }
-        .into());
+    let platform = request.platform;
+    let canonical_url = validate_media_url(&request.url, platform)?;
+    if platform == Platform::Web {
+        let source_page_url = validate_source_page_url(request.source_page_url.as_deref())?;
+        let (media_url, source_page_url) = resolve_web_media_url(canonical_url, source_page_url)?;
+        request.url = media_url.to_string();
+        request.source_page_url = source_page_url;
+    } else {
+        request.url = canonical_url.to_string();
+        request.source_page_url = None;
     }
-    request.url = canonical_url.to_string();
+    request.output_filename = if platform == Platform::Web {
+        request
+            .output_filename
+            .as_deref()
+            .map(validate_output_filename)
+            .transpose()?
+    } else {
+        None
+    };
     validate_output_directory(&request.output_directory)?;
     if request.browser_source == crate::models::BrowserSource::CookiesFile {
         let path = request
@@ -175,14 +192,31 @@ pub fn start_worker(app: AppHandle, state: AppState, mut receiver: mpsc::Receive
 
 fn ytdlp_download_args(request: &DownloadRequest) -> Result<Vec<String>, String> {
     let output_dir = validate_output_directory(&request.output_directory)?;
-    let template: PathBuf = output_dir.join("%(title).120B [%(id)s].%(ext)s");
+    let template: PathBuf = if request.platform == Platform::Web {
+        request
+            .output_filename
+            .as_deref()
+            .map(validate_output_filename)
+            .transpose()?
+            .map(|filename| output_dir.join(format!("{filename}.%(ext)s")))
+            .unwrap_or_else(|| output_dir.join("%(title).120B [%(id)s].%(ext)s"))
+    } else {
+        output_dir.join("%(title).120B [%(id)s].%(ext)s")
+    };
     let mut args = vec![
-        "--newline".into(), "--continue".into(), "--windows-filenames".into(), "--trim-filenames".into(), "180".into(),
+        "--newline".into(), "--progress".into(), "--progress-delta".into(), "0.5".into(), "--continue".into(), "--windows-filenames".into(), "--trim-filenames".into(), "180".into(),
         "--progress-template".into(), "download:OF_PROGRESS|%(progress._percent_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes_estimate)s|%(progress._speed_str)s|%(progress._eta_str)s".into(),
         "--print".into(), "before_dl:OF_ITEM|%(playlist_index)s/%(playlist_count)s".into(),
         "--print".into(), "after_move:OF_FILE|%(filepath)s".into(),
         "--output".into(), template.to_string_lossy().to_string(),
     ];
+    if request.platform == Platform::Web {
+        if let Some(source_page_url) = validate_source_page_url(request.source_page_url.as_deref())?
+        {
+            args.push("--referer".into());
+            args.push(source_page_url);
+        }
+    }
     args.push("--no-playlist".into());
     match request.output_format {
         OutputFormat::Mp4 => {
@@ -226,23 +260,21 @@ fn gallery_download_args(request: &DownloadRequest) -> Result<Vec<String>, Strin
 }
 
 async fn run_job(app: &AppHandle, state: &AppState, job: Job) {
-    let (_, platform) = match validate_media_url(&job.request.url) {
-        Ok(value) => value,
-        Err(error) => {
-            publish(app, state, &job.id, |task| {
-                task.status = TaskStatus::Failed;
-                task.error = Some(error);
-            })
-            .await;
-            return;
-        }
-    };
+    let platform = job.request.platform;
+    if let Err(error) = validate_media_url(&job.request.url, platform) {
+        publish(app, state, &job.id, |task| {
+            task.status = TaskStatus::Failed;
+            task.error = Some(error);
+        })
+        .await;
+        return;
+    }
     publish(app, state, &job.id, |task| {
         task.status = TaskStatus::Analyzing
     })
     .await;
     let command_and_args = match platform {
-        Platform::Youtube => tools::ytdlp_command(
+        Platform::Youtube | Platform::Web => tools::ytdlp_command(
             app,
             job.request.browser_source,
             job.request.cookie_file_path.as_deref(),
@@ -319,9 +351,7 @@ async fn run_job(app: &AppHandle, state: &AppState, job: Job) {
             line = line_rx.recv() => match line {
                 Some(ProcessLine::Stdout(line)) => {
                     if let Some(progress) = parse_progress(&line) {
-                        let event = ProgressEvent { task_id: job.id.clone(), percent: progress.percent, downloaded_bytes: progress.downloaded_bytes, total_bytes: progress.total_bytes, speed: progress.speed.clone(), eta: progress.eta.clone(), current_item: None };
-                        publish(app, state, &job.id, |task| { task.percent = progress.percent; task.downloaded_bytes = progress.downloaded_bytes; task.total_bytes = progress.total_bytes; task.speed = progress.speed; task.eta = progress.eta; }).await;
-                        let _ = app.emit("download://progress", event);
+                        report_progress(app, state, &job.id, progress).await;
                     } else if let Some(path) = parse_output(&line) {
                         let expected = job.request.item_count.unwrap_or(1).max(1);
                         publish(app, state, &job.id, |task| {
@@ -335,10 +365,14 @@ async fn run_job(app: &AppHandle, state: &AppState, job: Job) {
                     }
                 }
                 Some(ProcessLine::Stderr(line)) => {
-                    if line.contains("[ExtractAudio]") || line.contains("[Merger]") || line.contains("[VideoConvertor]") {
-                        publish(app, state, &job.id, |task| task.status = TaskStatus::Converting).await;
+                    if let Some(progress) = parse_progress(&line) {
+                        report_progress(app, state, &job.id, progress).await;
+                    } else {
+                        if line.contains("[ExtractAudio]") || line.contains("[Merger]") || line.contains("[VideoConvertor]") {
+                            publish(app, state, &job.id, |task| task.status = TaskStatus::Converting).await;
+                        }
+                        if stderr_log.len() < 65_536 { stderr_log.push_str(&line); stderr_log.push('\n'); }
                     }
-                    if stderr_log.len() < 65_536 { stderr_log.push_str(&line); stderr_log.push('\n'); }
                 }
                 None => break,
             }
@@ -361,7 +395,11 @@ async fn run_job(app: &AppHandle, state: &AppState, job: Job) {
         })
         .await;
     } else {
-        let error = friendly_error(&stderr_log);
+        let error = friendly_error_for_request(
+            &stderr_log,
+            platform,
+            job.request.source_page_url.is_some(),
+        );
         publish(app, state, &job.id, |task| {
             task.status = TaskStatus::Failed;
             task.error = Some(error);
@@ -371,6 +409,32 @@ async fn run_job(app: &AppHandle, state: &AppState, job: Job) {
         .await;
     }
     state.cancellations.write().await.remove(&job.id);
+}
+
+async fn report_progress(
+    app: &AppHandle,
+    state: &AppState,
+    task_id: &str,
+    progress: ParsedProgress,
+) {
+    let event = ProgressEvent {
+        task_id: task_id.to_string(),
+        percent: progress.percent,
+        downloaded_bytes: progress.downloaded_bytes,
+        total_bytes: progress.total_bytes,
+        speed: progress.speed.clone(),
+        eta: progress.eta.clone(),
+        current_item: None,
+    };
+    publish(app, state, task_id, |task| {
+        task.percent = progress.percent;
+        task.downloaded_bytes = progress.downloaded_bytes;
+        task.total_bytes = progress.total_bytes;
+        task.speed = progress.speed;
+        task.eta = progress.eta;
+    })
+    .await;
+    let _ = app.emit("download://progress", event);
 }
 
 async fn terminate_tree(child: &mut Child, pid: Option<u32>) {
@@ -393,6 +457,8 @@ mod tests {
         DownloadRequest {
             url: "https://youtu.be/test".into(),
             platform: Platform::Youtube,
+            source_page_url: None,
+            output_filename: None,
             browser_source: Default::default(),
             cookie_file_path: None,
             output_format: format,
@@ -405,6 +471,8 @@ mod tests {
     #[test]
     fn builds_mp4_arguments_without_shell_text() {
         let args = ytdlp_download_args(&request(OutputFormat::Mp4)).unwrap();
+        assert!(args.contains(&"--progress".to_string()));
+        assert!(args.contains(&"--progress-delta".to_string()));
         assert!(args.contains(&"bv*[height<=1080]+ba/b[height<=1080]".to_string()));
         assert_eq!(args.last().unwrap(), "https://youtu.be/test");
     }
@@ -422,5 +490,33 @@ mod tests {
         let args = gallery_download_args(&value).unwrap();
         assert!(args.contains(&"--directory".to_string()));
         assert!(args.contains(&"after:OF_FILE|{_path}".to_string()));
+    }
+
+    #[test]
+    fn adds_web_referer_as_separate_arguments() {
+        let mut value = request(OutputFormat::Mp4);
+        value.url = "https://cdn.example.com/video/master.m3u8".into();
+        value.platform = Platform::Web;
+        value.source_page_url = Some("https://example.com/watch/123".into());
+        let args = ytdlp_download_args(&value).unwrap();
+        let position = args.iter().position(|arg| arg == "--referer").unwrap();
+        assert_eq!(args[position + 1], "https://example.com/watch/123");
+        assert_eq!(args.last().unwrap(), &value.url);
+    }
+
+    #[test]
+    fn uses_custom_filename_only_for_web_downloads() {
+        let mut value = request(OutputFormat::Mp4);
+        value.url = "https://cdn.example.com/video/master.m3u8".into();
+        value.platform = Platform::Web;
+        value.output_filename = Some("My video.mp4".into());
+        let args = ytdlp_download_args(&value).unwrap();
+        let position = args.iter().position(|arg| arg == "--output").unwrap();
+        assert!(args[position + 1].ends_with("My video.%(ext)s"));
+
+        value.platform = Platform::Youtube;
+        let args = ytdlp_download_args(&value).unwrap();
+        let position = args.iter().position(|arg| arg == "--output").unwrap();
+        assert!(args[position + 1].contains("%(title).120B"));
     }
 }

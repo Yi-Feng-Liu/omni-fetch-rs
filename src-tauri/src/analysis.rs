@@ -1,8 +1,8 @@
 use crate::{
-    errors::friendly_error,
+    errors::{friendly_error, friendly_error_for_request},
     models::{AnalyzeRequest, MediaAnalysis, MediaItem, OutputFormat, Platform, QualityOption},
     tools,
-    validation::validate_media_url,
+    validation::{resolve_web_media_url, validate_media_url, validate_source_page_url},
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -10,34 +10,50 @@ use tauri::AppHandle;
 use tokio::time::{timeout, Duration};
 
 pub async fn analyze(app: &AppHandle, request: AnalyzeRequest) -> Result<MediaAnalysis, String> {
-    let (parsed, platform) = validate_media_url(&request.url)?;
-    if platform != request.platform {
-        return Err(match request.platform {
-            Platform::Instagram => "目前是 Instagram 模式，請貼上 Instagram 貼文或 Reels 網址。",
-            Platform::Youtube => "目前是 YouTube 模式，請貼上 YouTube 影片或 Shorts 網址。",
-        }
-        .into());
-    }
+    let platform = request.platform;
+    let parsed = validate_media_url(&request.url, platform)?;
     if platform == Platform::Instagram {
         return analyze_instagram(app, request, parsed.to_string()).await;
     }
+    let (media_url, source_page_url) = if platform == Platform::Web {
+        let source_page_url = validate_source_page_url(request.source_page_url.as_deref())?;
+        resolve_web_media_url(parsed, source_page_url)?
+    } else {
+        (parsed, None)
+    };
+    let has_source_page = source_page_url.is_some();
     let mut command = tools::ytdlp_command(
         app,
         request.browser_source,
         request.cookie_file_path.as_deref(),
     )?;
+    if let Some(source_page_url) = source_page_url {
+        command.arg("--referer").arg(source_page_url);
+    }
     command.args(["--dump-single-json", "--skip-download", "--no-warnings"]);
     command.arg("--no-playlist");
-    command.arg(parsed.as_str());
+    command.arg(media_url.as_str());
     let output = timeout(Duration::from_secs(90), command.output())
         .await
         .map_err(|_| "分析逾時，請確認網路連線後重試。")?
         .map_err(|_| "找不到下載引擎。請執行工具準備腳本或重新安裝 Omni Fetch。")?;
     if !output.status.success() {
-        return Err(friendly_error(&String::from_utf8_lossy(&output.stderr)));
+        return Err(friendly_error_for_request(
+            &String::from_utf8_lossy(&output.stderr),
+            platform,
+            has_source_page,
+        ));
     }
     let json: Value =
         serde_json::from_slice(&output.stdout).map_err(|_| "下載引擎回傳了無法辨識的媒體資訊。")?;
+    if json
+        .get("has_drm")
+        .or_else(|| json.get("_has_drm"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err("此影片受到 DRM 保護，Omni Fetch 不支援下載或繞過保護。".into());
+    }
     if json
         .get("is_live")
         .and_then(Value::as_bool)
@@ -49,7 +65,7 @@ pub async fn analyze(app: &AppHandle, request: AnalyzeRequest) -> Result<MediaAn
     {
         return Err("第一版不支援直播下載。".into());
     }
-    from_json(parsed.to_string(), platform, &json)
+    from_json(media_url.to_string(), platform, &json)
 }
 
 async fn analyze_instagram(
@@ -281,7 +297,7 @@ fn from_json(url: String, platform: Platform, json: &Value) -> Result<MediaAnaly
         is_carousel: items.len() > 1,
         items,
         qualities,
-        supported_outputs: if platform == Platform::Youtube {
+        supported_outputs: if matches!(platform, Platform::Youtube | Platform::Web) {
             vec![OutputFormat::Mp4, OutputFormat::Mp3, OutputFormat::Original]
         } else {
             vec![OutputFormat::Original]
@@ -313,6 +329,23 @@ mod tests {
         .unwrap();
         assert!(result.is_carousel);
         assert_eq!(result.items.len(), 2);
+    }
+
+    #[test]
+    fn maps_web_video_outputs() {
+        let json: Value =
+            serde_json::json!({"id":"5378","title":"5378","duration":354.0,"ext":"mp4"});
+        let result = from_json(
+            "https://cdn.example.com/videos/5378/5378.m3u8".into(),
+            Platform::Web,
+            &json,
+        )
+        .unwrap();
+        assert_eq!(
+            result.supported_outputs,
+            vec![OutputFormat::Mp4, OutputFormat::Mp3, OutputFormat::Original]
+        );
+        assert_eq!(result.items[0].media_type, "video");
     }
 
     #[test]

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum Platform {
     Youtube,
     Instagram,
+    Web,
 }
 
 impl Default for Platform {
@@ -48,6 +49,8 @@ pub enum TaskStatus {
 pub struct AnalyzeRequest {
     pub url: String,
     pub platform: Platform,
+    #[serde(default)]
+    pub source_page_url: Option<String>,
     pub browser_source: BrowserSource,
     pub cookie_file_path: Option<String>,
 }
@@ -90,6 +93,10 @@ pub struct MediaAnalysis {
 pub struct DownloadRequest {
     pub url: String,
     pub platform: Platform,
+    #[serde(default)]
+    pub source_page_url: Option<String>,
+    #[serde(default)]
+    pub output_filename: Option<String>,
     pub browser_source: BrowserSource,
     pub cookie_file_path: Option<String>,
     pub output_format: OutputFormat,

@@ -25,6 +25,13 @@ const media = {
   supportedOutputs: ["mp4", "mp3", "original"],
 };
 
+const webMedia = {
+  url: "https://cdn.example.com/video/master.m3u8", platform: "web", title: "Web video",
+  thumbnail: undefined, durationSeconds: 20, isCarousel: false,
+  items: [{ id: "web-video", title: "Web video", mediaType: "video" }],
+  qualities: [], supportedOutputs: ["mp4", "mp3", "original"],
+};
+
 describe("App", () => {
   beforeEach(() => { analyze.mockReset(); enqueue.mockReset(); });
 
@@ -68,5 +75,48 @@ describe("App", () => {
       fireEvent.click(screen.getByRole("button", { name: "YouTube" }));
     });
     expect(screen.getByPlaceholderText(/YouTube 影片/)).toBeInTheDocument();
+  });
+
+  it("shows the optional source page only in web mode", async () => {
+    render(<App />);
+    await act(async () => undefined);
+    expect(screen.queryByLabelText("來源頁網址")).not.toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "一般網頁" }));
+    });
+    expect(screen.getByPlaceholderText(/\.m3u8/)).toBeInTheDocument();
+    expect(screen.getByLabelText("來源頁網址")).toBeInTheDocument();
+  });
+
+  it("passes the source page through analysis and download", async () => {
+    analyze.mockResolvedValue(webMedia);
+    enqueue.mockResolvedValue({
+      id: "task-web", request: { outputFormat: "mp4" }, title: "Web video", platform: "web", status: "queued",
+      percent: 0, outputs: [],
+    });
+    render(<App />);
+    await act(async () => undefined);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "一般網頁" }));
+    });
+    fireEvent.change(screen.getByLabelText("媒體網址"), { target: { value: webMedia.url } });
+    fireEvent.change(screen.getByLabelText("來源頁網址"), { target: { value: "https://example.com/watch/123" } });
+    fireEvent.click(screen.getByRole("button", { name: /分析連結/ }));
+    expect(await screen.findByText("Web video")).toBeInTheDocument();
+    expect(screen.queryByText("影片畫質")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("儲存檔名")).toHaveValue("Web video");
+    expect(analyze).toHaveBeenCalledWith(expect.objectContaining({
+      platform: "web",
+      sourcePageUrl: "https://example.com/watch/123",
+    }));
+    fireEvent.change(screen.getByLabelText("儲存檔名"), { target: { value: "My clip.mp4" } });
+    fireEvent.click(screen.getByRole("button", { name: /加入下載佇列/ }));
+    await waitFor(() => expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({
+      platform: "web",
+      sourcePageUrl: "https://example.com/watch/123",
+      outputFilename: "My clip.mp4",
+      qualityHeight: undefined,
+    })));
+    expect(await screen.findByText(/等待下載資料/)).toBeInTheDocument();
   });
 });

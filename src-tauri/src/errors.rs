@@ -1,3 +1,34 @@
+use crate::models::Platform;
+
+pub fn friendly_error_for_request(
+    stderr: &str,
+    platform: Platform,
+    has_source_page: bool,
+) -> String {
+    let text = stderr.to_ascii_lowercase();
+    if text.contains("drm") {
+        return "此影片受到 DRM 保護，Omni Fetch 不支援下載或繞過保護。".into();
+    }
+    if platform == Platform::Web
+        && (text.contains("403")
+            || text.contains("forbidden")
+            || text.contains("cloudflare anti-bot"))
+    {
+        return if has_source_page {
+            "網站仍拒絕存取。請確認來源頁網址與 Cookie 有效，或改用瀏覽器匯出的 cookies.txt。"
+                .into()
+        } else {
+            "網站拒絕直接存取。請在「來源頁網址」填入實際播放影片的網頁後重試。".into()
+        };
+    }
+    if platform == Platform::Web
+        && (text.contains("unsupported url") || text.contains("no suitable extractor"))
+    {
+        return "無法從這個網頁找出影片；請改貼播放器使用的 .m3u8 播放清單網址。".into();
+    }
+    friendly_error(stderr)
+}
+
 pub fn friendly_error(stderr: &str) -> String {
     let text = stderr.to_ascii_lowercase();
     if text.contains("redirect to login")
@@ -70,5 +101,20 @@ mod tests {
     #[test]
     fn does_not_expose_empty_output() {
         assert!(!friendly_error("").is_empty());
+    }
+
+    #[test]
+    fn maps_web_access_and_extractor_failures() {
+        assert!(
+            friendly_error_for_request("HTTP Error 403: Forbidden", Platform::Web, false)
+                .contains("來源頁網址")
+        );
+        assert!(
+            friendly_error_for_request("Unsupported URL", Platform::Web, false).contains(".m3u8")
+        );
+        assert!(
+            friendly_error_for_request("This video is DRM protected", Platform::Web, true)
+                .contains("DRM")
+        );
     }
 }
